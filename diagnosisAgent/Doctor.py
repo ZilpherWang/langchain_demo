@@ -6,11 +6,17 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph
 
 from langchain_core.messages import HumanMessage
+from langgraph.constants import START, END
 from langchain_community.chat_models import ChatTongyi
 from langchain_core.prompts import ChatPromptTemplate
+from typing import TypedDict, Annotated
+from langchain_core.messages import AnyMessage, HumanMessage, AIMessage
+from operator import add
 import os
 
-from MultiAgent.coupletLoader import vector_store
+# from MultiAgent.coupletLoader import vector_store
+
+nodes = ["guidance", "diagnosis", "error", "doctor"]
 
 
 llm = ChatTongyi(
@@ -18,16 +24,20 @@ llm = ChatTongyi(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
 )
 
+class State(TypedDict):
+    messages: Annotated[list[AnyMessage], add]
+    type: str
+
 
 def supervisor_node(state:State):
     print(">>> supervisor_node")
-    writer = get_stream_writer()
-    writer({"node", ">>>> supervisor_node"})
+    # writer = get_stream_writer()
+    # writer({"node", ">>>> supervisor_node"})
     # 更具用户的问题，对问题进行分类
     prompt = """你是一个专业的智能助手，根据用户的问题，对问题进行分类，并将任务分给其他Agent执行
-            如果用户的问题是关于旅游的，返回guidance。
-            如果用户的问题是关于笑话的，返回diagnosis。
-            如果用户的问题是关于诗词的，返回doctor。
+            如果用户的问题是关于就诊记录的，返回guidance。
+            如果用户的问题是关于病情诊断的，返回diagnosis。
+            如果用户的问题是关于咨询医生的，返回doctor。
             如果用户的问题是其他的，返回error。
             除了这几个选项外，不要返回其他的内容。
             """
@@ -37,10 +47,10 @@ def supervisor_node(state:State):
     ]
     # 如果已经有type属性了，表示问题已经交由其他节点处理完成了，就可以直接返回
     if "type" in state:
-        writer({"supervisor_step": f"已获得 {state['type']} 智能体处理结果"})
+        # writer({"supervisor_step": f"已获得 {state['type']} 智能体处理结果"})
         return {"type": END}
     response = llm.invoke(prompts) 
-    writer({"supervisor_step", f"问题分类结果：{response.content}"})
+    # writer({"supervisor_step", f"问题分类结果：{response.content}"})
     if response.content in nodes:
         return {"type": response.content}
     else:
@@ -58,7 +68,7 @@ def supervisor_node(state:State):
 #         print("guidance_result:"+message)
 #     return {"messages": [HumanMessage(content=response["messages"][-1].content)], "type": "guidance"}
 
-def guidance_node(state: State):
+async def guidance_node(state: State):
     print(">>> guidance_node")
     # writer = get_stream_writer()
     # writer({"node": ">>> guidance_node"})
@@ -75,13 +85,15 @@ def guidance_node(state: State):
             },
         }
     )
-    tools = client.get_tools()
+    tools = await client.get_tools()
     agent = create_react_agent(
         model=llm,
         tools=tools
     )
-    response = asyncio.run(agent.ainvoke({"messages": prompts}))
+    response = await agent.ainvoke({"messages": prompts})
+    # response = agent.ainvoke({"messages": prompts})
     print(response)
+    # writer({"guidance_result": response["messages"][-1].content})
     return {"messages": [HumanMessage(content=response["messages"][-1].content)], "type": "guidance"}
 
 
@@ -99,6 +111,9 @@ def doctor_node(state: State):
     response = llm.invoke(prompts)
     # writer({"doctor_result": response.content})
     return {"messages": [HumanMessage(content=response.content)], "type": "doctor"}
+
+def error_node(state: State):
+    print(">>> error_node")
 
 def diagnosis_node(state: State):
     print(">>> diagnosis_node")
@@ -132,24 +147,24 @@ def routing_func(state:State):
         return "diagnosis_node"
     elif state["type"] == "doctor":
         return "doctor_node"
-    elif state["type"] == "couplet":
-        return "couplet_node"
+    elif state["type"] == "guidance":
+        return "guidance_node"
     elif state["type"] == END:
         return END
     else:
-        return "other_node"
+        return "error_node"
 # 构建图
 builder = StateGraph(State)
 # 添加节点
 builder.add_node("supervisor_node", supervisor_node)
-builder.add_node("travel_node", travel_node)
-builder.add_node("joke_node", joke_node)
-builder.add_node("couplet_node", couplet_node)
-builder.add_node("other_node", other_node)
+builder.add_node("guidance_node", guidance_node)
+builder.add_node("diagnosis_node", diagnosis_node)
+builder.add_node("error_node", error_node)
+builder.add_node("doctor_node", doctor_node)
 # 添加边
 builder.add_edge(START, "supervisor_node")
-builder.add_conditional_edges("supervisor_node", routing_func, ["travel_node", "joke_node", "couplet_node", "other_node", END])
-builder.add_edge("travel_node", "supervisor_node")
+builder.add_conditional_edges("supervisor_node", routing_func, ["guidance_node", "diagnosis_node", "error_node", "doctor_node", END])
+builder.add_edge("guidance_node", "supervisor_node")
 builder.add_edge("diagnosis_node", "supervisor_node")
 builder.add_edge("error_node", "supervisor_node")
 builder.add_edge("doctor_node", "supervisor_node")
@@ -164,8 +179,8 @@ if __name__ == "__main__":
             "thread_id": "1"
         }
     }
-    for chunk in graph.stream({"messages": ["查找001号病人的就诊记录"]}, config, stream_mode="custom"):
-        print(chunk)
+    response = asyncio.run(graph.ainvoke({"messages": ["查找001号病人的就诊记录"]}, config))
+    print(response, 111)
     # 查找001号病人的就诊记录
     # 右膝内侧副韧带损伤怎么处理？
     res = graph.invoke({"messages": ["你们这最牛的医生是谁？"]}, config)

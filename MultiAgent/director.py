@@ -44,7 +44,7 @@ def supervisor_node(state:State):
     if "type" in state:
         writer({"supervisor_step": f"已获得 {state['type']} 智能体处理结果"})
         return {"type": END}
-    response = llm.invoke(prompts) 
+    response = llm.invoke(prompts)   # pyright: ignore[reportUnreachable]
     writer({"supervisor_step", f"问题分类结果：{response.content}"})
     if response.content in nodes:
         return {"type": response.content}
